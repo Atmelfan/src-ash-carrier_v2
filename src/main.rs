@@ -2,6 +2,8 @@
 #![no_main]
 #![no_std]
 
+mod scpi_framer;
+
 use panic_halt as _;
 
 use cortex_m::{asm, singleton};
@@ -11,13 +13,20 @@ use cortex_m_rt::entry;
 use core::fmt::Write;
 
 // HAL
+use stm32f4xx_hal::stm32;
 use stm32f4xx_hal::stm32::{
     interrupt,
-    I2C1
 };
 use stm32f4xx_hal::{
     prelude::*,
+    delay::Delay,
+    serial
 };
+
+use heapless::spsc::Queue;
+use heapless::consts::*;
+
+use lazy_static::lazy_static;
 
 // I2C Stuff
 use shared_bus::BusManager;
@@ -45,12 +54,19 @@ use scpi::{
 };
 use scpi::response::{ArrayVecFormatter, Formatter};
 
-use core::str;
-use git_version::git_version;
+// Semihosting
+//use cortex_m_semihosting::hprintln;
 
-use cortex_m_semihosting::hprintln;
+// Git version
+use git_version::git_version;
+use stm32f4xx_hal::serial::config::Config;
 
 const GIT_VERSION: &[u8] = git_version!().as_bytes();
+
+mod jetson;
+mod buffer;
+
+
 
 //***********************************************************************************
 /// # SCPI code
@@ -71,22 +87,55 @@ impl Device for MyDevice {
 /// # Main code
 
 #[interrupt]
-fn USART1(){
-
+fn USART2(){
 }
 
 #[entry]
 fn main() -> ! {
 
+
+    let dp = stm32::Peripherals::take().unwrap();
+    let cp = cortex_m::peripheral::Peripherals::take().unwrap();
+    // Set up the system clock.
+    let rcc = dp.RCC.constrain();
+    let clocks = rcc.cfgr.freeze();
+    let mut delay = Delay::new(cp.SYST, clocks);
+
+    let gpioa = dp.GPIOA.split();
+    let mut pa2 = gpioa.pa2;
+    let mut pa3 = gpioa.pa3.into_push_pull_output();
+    let mut pa9 = gpioa.pa9.into_push_pull_output();
+    let gpiob = dp.GPIOB.split();
+    let gpioc = dp.GPIOC.split();
+
+    // Start jetson
+    pa3.set_low().unwrap();
+    delay.delay_ms(100u8);
+    pa9.set_high();
+    delay.delay_ms(100u8);
+    pa9.set_low();
+    delay.delay_ms(100u8);
+
+    // SCPI serial
+    dp.USART2.cr1.modify(|_,w| w.rxneie().set_bit());
+    let (serial_tx, serial_rx) = serial::Serial::usart2(
+        dp.USART2,
+        (pa2.into_alternate_af7(), pa3.into_alternate_af7()),
+        serial::config::Config::default()
+            .baudrate(115200.bps()),
+        clocks,
+    ).unwrap().split();
+
+
     // SCPI
     let mut my_device = MyDevice { };
 
-    let mut tree = Node {name: b"ROOT", optional: true, handler: None, sub: Some(&[
+    let tree = Node {name: b"ROOT", optional: true, handler: None, sub: Some(&[
         // Create default IEEE488 mandated commands
         Node {name: b"*IDN", optional: false,
             handler: Some(&IdnCommand{
                 manufacturer: b"GPA-Robotics",
-                model: b"ash-power",
+                model: b"ash-carrier",
                 serial: b"0",
                 firmware: GIT_VERSION
             }),
@@ -109,8 +158,7 @@ fn main() -> ! {
 
     let mut errors = ArrayErrorQueue::<[Error; 10]>::new();
 
-    let mut context = Context::new(&mut my_device, &mut errors, &mut tree);
-
+    let mut context = Context::new(&mut my_device, &mut errors, &tree);
 
     loop {
 
