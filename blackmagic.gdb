@@ -1,5 +1,5 @@
 # Assumes that you have udev rules set up for black magic probe
-target extended-remote /dev/ttyACM1
+target extended-remote /dev/ttyBmpGdb
 
 # Enable target power
 # monitor tpwr enable
@@ -21,8 +21,6 @@ break HardFault
 break rust_begin_unwind
 
 # *try* to stop at the user entry point (it might be gone due to inlining)
-break main
+#break main
 
 load
-
-stepi
